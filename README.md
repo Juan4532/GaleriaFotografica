@@ -20,6 +20,8 @@ ni base de datos: cada carpeta de `fotografias/` es una galería.
    - El nombre de la carpeta es el título: `01-viaje-a-Lisboa` se muestra como
      «Viaje a Lisboa». El número del principio solo sirve para ordenar.
    - Las fotos se ordenan por nombre (`foto 2` va antes que `foto 10`).
+   - Las carpetas que empiezan por `_`, `.` o `@` se ignoran: sirven para
+     guardar borradores sin publicarlos.
 
 2. Instala Pillow (solo la primera vez) y ejecuta el script:
 

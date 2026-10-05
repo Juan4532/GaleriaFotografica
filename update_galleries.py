@@ -17,6 +17,7 @@ Uso:
 """
 
 import argparse
+import io
 import json
 import os
 import re
@@ -35,12 +36,20 @@ EXTENSIONES_WEB = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp"}
 # Formatos que solo se pueden publicar si Pillow los convierte a JPEG
 EXTENSIONES_CONVERTIBLES = {".tif", ".tiff", ".heic", ".heif"}
 
-TAMANO_MINIATURA = 800   # lado mayor máximo, en píxeles
-TAMANO_GRANDE = 2048
+# Miniatura: la altura manda (la cuadrícula va por filas); el ancho deja sitio
+# a las panorámicas. Versión grande: lado mayor máximo. En píxeles.
+TAMANO_MINIATURA = (2400, 720)
+TAMANO_GRANDE = (2048, 2048)
 CALIDAD_JPEG = 82
 
 try:
     from PIL import Image, ImageOps
+    # Son tus propias fotos: se admiten panorámicas muy grandes sin avisos
+    Image.MAX_IMAGE_PIXELS = None
+    try:
+        from PIL import ImageCms
+    except ImportError:
+        ImageCms = None
     try:
         from pillow_heif import register_heif_opener  # opcional
         register_heif_opener()
@@ -52,12 +61,24 @@ except ImportError:
 
 def orden_natural(texto):
     """Ordena 'foto 2' antes que 'foto 10'."""
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", texto)]
+    return [int(t) if t.isdecimal() else t.lower() for t in re.split(r"(\d+)", texto)]
 
 
-def es_oculto(ruta):
-    # ".DS_Store", "._foto.jpg" (macOS), "@eaDir" (Synology), "_borradores"...
-    return ruta.name.startswith((".", "_", "@"))
+def carpeta_oculta(carpeta):
+    # ".git", "@eaDir" (Synology), "_borradores"...
+    return carpeta.name.startswith((".", "_", "@"))
+
+
+def archivo_oculto(archivo):
+    # ".DS_Store", "._foto.jpg" (macOS). Los que empiezan por "_" son fotos
+    # normales: muchas cámaras las nombran así (_MG_1234.JPG, _DSC0001.JPG)
+    return archivo.name.startswith(".")
+
+
+def nfc(texto):
+    # macOS guarda las tildes descompuestas (NFD); git y los servidores suelen
+    # usarlas compuestas (NFC)
+    return unicodedata.normalize("NFC", texto)
 
 
 def titulo_legible(nombre_carpeta):
@@ -69,8 +90,10 @@ def titulo_legible(nombre_carpeta):
 
 def url_relativa(ruta):
     """Ruta relativa a la web, codificada para que espacios o tildes no rompan la URL."""
-    # macOS guarda las tildes descompuestas (NFD); git y los servidores, compuestas (NFC)
-    relativa = unicodedata.normalize("NFC", ruta.relative_to(RAIZ).as_posix())
+    relativa = ruta.relative_to(RAIZ).as_posix()
+    # Se usa la forma NFC solo si también existe en disco con ese nombre
+    if nfc(relativa) != relativa and (RAIZ / nfc(relativa)).exists():
+        relativa = nfc(relativa)
     return quote(relativa, safe="/")
 
 
@@ -78,7 +101,7 @@ def buscar_fotos(carpeta, con_pillow):
     validas = EXTENSIONES_WEB | (EXTENSIONES_CONVERTIBLES if con_pillow else set())
     fotos, ignoradas = [], []
     for archivo in carpeta.iterdir():
-        if not archivo.is_file() or es_oculto(archivo):
+        if not archivo.is_file() or archivo_oculto(archivo):
             continue
         ext = archivo.suffix.lower()
         if ext in validas:
@@ -95,25 +118,53 @@ def nombres_salida(fotos):
     """Nombre .jpg de cada versión optimizada, sin colisiones (a.jpg y a.png)."""
     usados, nombres = set(), {}
     for foto in fotos:
-        nombre = foto.stem + ".jpg"
+        stem = nfc(foto.stem)
+        nombre = stem + ".jpg"
         if nombre.lower() in usados:
-            nombre = f"{foto.stem}_{foto.suffix.lstrip('.')}.jpg"
+            nombre = f"{stem}_{foto.suffix.lstrip('.')}.jpg"
         usados.add(nombre.lower())
         nombres[foto] = nombre
     return nombres
 
 
+def a_rgb_srgb(img):
+    """Convierte cualquier foto a RGB en el espacio sRGB que usan los navegadores."""
+    icc = img.info.get("icc_profile")
+    if icc and ImageCms is not None:
+        try:
+            origen = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+            destino = ImageCms.createProfile("sRGB")
+            modo = "RGBA" if "A" in img.getbands() else "RGB"
+            if img.mode not in ("RGB", "RGBA", "L", "LA", "CMYK"):
+                img = img.convert("RGBA" if modo == "RGBA" else "RGB")
+            img = ImageCms.profileToProfile(img, origen, destino, outputMode=modo)
+        except (ImageCms.PyCMSError, OSError, ValueError):
+            pass  # perfil dañado: se usan los colores tal cual
+    if img.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I"):
+        # Escaneos de 16 bits en escala de grises: llevar 0..65535 a 0..255
+        img = img.point(lambda v: v / 256).convert("L")
+    elif img.mode == "F":
+        maximo = img.getextrema()[1] or 1
+        img = img.point(lambda v: v * (255 / maximo)).convert("L")
+    if img.mode not in ("RGB", "L"):
+        fondo = Image.new("RGB", img.size, (17, 17, 17))
+        rgba = img.convert("RGBA")
+        fondo.paste(rgba, mask=rgba.getchannel("A"))
+        img = fondo
+    return img
+
+
 def guardar_reducida(imagen, destino, tamano):
     copia = imagen.copy()
-    copia.thumbnail((tamano, tamano), Image.LANCZOS)
+    copia.thumbnail(tamano, Image.LANCZOS)
     destino.parent.mkdir(parents=True, exist_ok=True)
     copia.save(destino, "JPEG", quality=CALIDAD_JPEG, optimize=True, progressive=True)
 
 
 def optimizar(foto, nombre_galeria, nombre_salida, forzar):
     """Crea miniatura y versión grande. Devuelve (miniatura, grande, ancho, alto)."""
-    mini = CARPETA_OPTIMIZADAS / nombre_galeria / "mini" / nombre_salida
-    grande = CARPETA_OPTIMIZADAS / nombre_galeria / "grande" / nombre_salida
+    mini = CARPETA_OPTIMIZADAS / nfc(nombre_galeria) / "mini" / nombre_salida
+    grande = CARPETA_OPTIMIZADAS / nfc(nombre_galeria) / "grande" / nombre_salida
     # Las versiones optimizadas llevan la misma fecha que el original: si la
     # fecha cambia (aunque sea a una anterior), la foto se ha sustituido
     fecha = foto.stat().st_mtime_ns
@@ -130,12 +181,7 @@ def optimizar(foto, nombre_galeria, nombre_salida, forzar):
 
     with Image.open(foto) as img:
         # Respeta la orientación EXIF: muchas cámaras guardan las verticales giradas
-        img = ImageOps.exif_transpose(img)
-        if img.mode not in ("RGB", "L"):
-            fondo = Image.new("RGB", img.size, (17, 17, 17))
-            rgba = img.convert("RGBA")
-            fondo.paste(rgba, mask=rgba.getchannel("A"))
-            img = fondo
+        img = a_rgb_srgb(ImageOps.exif_transpose(img))
         guardar_reducida(img, mini, TAMANO_MINIATURA)
         guardar_reducida(img, grande, TAMANO_GRANDE)
     for destino in (mini, grande):
@@ -145,13 +191,21 @@ def optimizar(foto, nombre_galeria, nombre_salida, forzar):
     return mini, grande, ancho, alto
 
 
+def identidad(ruta):
+    # Compara archivos por identidad y no por nombre: en discos que no distinguen
+    # mayúsculas (macOS, Windows) "Viaje" y "viaje" son la misma carpeta
+    info = ruta.stat()
+    return (info.st_dev, info.st_ino)
+
+
 def limpiar_optimizadas(generadas):
     """Borra de optimizadas/ las imágenes de fotos que ya no existen."""
     if not CARPETA_OPTIMIZADAS.exists():
         return 0
+    en_uso = {identidad(ruta) for ruta in generadas if ruta.exists()}
     borradas = 0
     for archivo in CARPETA_OPTIMIZADAS.rglob("*"):
-        if archivo.is_file() and archivo not in generadas:
+        if archivo.is_file() and identidad(archivo) not in en_uso:
             archivo.unlink()
             borradas += 1
     for carpeta in sorted(CARPETA_OPTIMIZADAS.rglob("*"), reverse=True):
@@ -162,7 +216,7 @@ def limpiar_optimizadas(generadas):
 
 def escanear(optimizar_fotos, forzar, enlazar_originales):
     galerias, generadas = [], set()
-    subcarpetas = [c for c in CARPETA_FOTOS.iterdir() if c.is_dir() and not es_oculto(c)]
+    subcarpetas = [c for c in CARPETA_FOTOS.iterdir() if c.is_dir() and not carpeta_oculta(c)]
 
     sueltas = [f for f in CARPETA_FOTOS.iterdir()
                if f.is_file() and f.suffix.lower() in EXTENSIONES_WEB | EXTENSIONES_CONVERTIBLES]
@@ -199,8 +253,8 @@ def escanear(optimizar_fotos, forzar, enlazar_originales):
             print(f"   {i}/{len(fotos)} {foto.name}".ljust(60), end="\r", flush=True)
 
         galerias.append({
-            "nombre": carpeta.name,
-            "titulo": titulo_legible(carpeta.name),
+            "nombre": nfc(carpeta.name),
+            "titulo": titulo_legible(nfc(carpeta.name)),
             "fotos": entradas,
         })
         print(f"📁 Galería '{carpeta.name}': {len(entradas)} fotos".ljust(60))

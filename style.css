@@ -100,11 +100,16 @@ img {
     gap: var(--space-16);
 }
 
+.cabecera-galeria > div {
+    min-width: 0;
+}
+
 .titulo-galeria {
     font-size: clamp(1.25rem, 1rem + 1vw, 1.75rem);
     font-weight: 600;
     line-height: 1.2;
     letter-spacing: -0.01em;
+    overflow-wrap: anywhere;
 }
 
 .titulo-galeria:focus {
@@ -220,9 +225,11 @@ img {
     --proporcion: 1.3333;
     position: relative;
     display: block;
-    flex-grow: var(--proporcion);
+    /* x100: si la suma de factores es menor que 1, flex no reparte todo el hueco */
+    flex-grow: calc(var(--proporcion) * 100);
     flex-basis: calc(var(--altura-fila) * var(--proporcion));
-    max-width: 100%;
+    /* Una foto que se queda sola en su fila no crece más de 1,6 veces la altura */
+    max-width: min(100%, calc(var(--altura-fila) * var(--proporcion) * 1.6));
     aspect-ratio: var(--proporcion);
     overflow: hidden;
     border-radius: var(--radius-sm);
@@ -234,6 +241,11 @@ img {
     height: 100%;
     object-fit: cover;
     transition: opacity var(--portfolio-transition), transform var(--portfolio-transition);
+}
+
+/* Hasta saber su proporción, la miniatura se muestra entera */
+.foto-item.sin-dimensiones img {
+    object-fit: contain;
 }
 
 /* Vista de foto completa */
@@ -257,12 +269,24 @@ img {
 .info-foto {
     flex: 1;
     min-width: 0;
+    display: flex;
+    gap: var(--space-8);
     color: rgba(255, 255, 255, 0.85);
     font-size: 0.9375rem;
-    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.info-titulo {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+}
+
+/* La posición nunca se recorta, aunque el título sea largo */
+.info-posicion {
+    flex: none;
+    color: rgba(255, 255, 255, 0.6);
+    font-variant-numeric: tabular-nums;
 }
 
 .vista-completa .boton-redondo {
@@ -307,12 +331,12 @@ img {
     padding: 80px 96px;
 }
 
+/* La imagen ocupa toda la caja y la foto se ajusta dentro: así la miniatura
+   provisional se ve al mismo tamaño que la versión grande que la sustituye */
 .contenedor-imagen img {
-    max-width: 100%;
-    max-height: 100%;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
-    border-radius: var(--radius-sm);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
     user-select: none;
     -webkit-user-select: none;
     transition: filter 0.2s ease;
@@ -426,15 +450,12 @@ img {
     .contenedor-imagen {
         padding: 72px 0 80px;
     }
-
-    .contenedor-imagen img {
-        border-radius: 0;
-    }
 }
 
 @media (max-width: 480px) {
     :root {
-        --altura-fila: 120px;
+        /* Permite que una foto 4:3 y una 16:9 compartan fila en un móvil */
+        --altura-fila: 110px;
     }
 }
 

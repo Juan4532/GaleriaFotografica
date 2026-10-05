@@ -63,7 +63,8 @@ const elementos = {
     contadorGaleria: document.querySelector('.contador-galeria'),
     contenedorImagen: document.querySelector('.contenedor-imagen'),
     imagenCompleta: document.getElementById('imagen-completa'),
-    infoFoto: document.getElementById('info-foto'),
+    infoTitulo: document.querySelector('.info-titulo'),
+    infoPosicion: document.querySelector('.info-posicion'),
     btnOriginal: document.querySelector('.btn-original'),
     btnVolver: document.querySelector('.btn-volver'),
     btnCerrar: document.querySelector('.btn-cerrar'),
@@ -100,10 +101,10 @@ function leerRuta() {
     return { galeria, nombre, numero };
 }
 
-// Navega añadiendo una entrada al historial. Se marca el estado para saber que
-// "volver" puede usar history.back() sin salir de la web.
-function navegar(hash, estado = {}) {
-    history.pushState({ ...estado, interno: true }, '', hash);
+// Navega añadiendo una entrada al historial. "padre" es la ruta desde la que se
+// navega: si al volver coincide con el destino, basta con history.back().
+function navegar(hash, padre = null) {
+    history.pushState({ padre }, '', hash);
     mostrarRuta();
 }
 
@@ -113,12 +114,11 @@ function reemplazarRuta(hash) {
 }
 
 function volverA(hash) {
-    if (history.state && history.state.interno) {
+    if (history.state && history.state.padre === hash) {
         history.back();
     } else {
-        // Se entró directamente con un enlace: no hay a dónde volver dentro de la web
-        history.replaceState(null, '', hash);
-        mostrarRuta();
+        // Se entró con un enlace directo: se avanza al destino en vez de salir de la web
+        navegar(hash);
     }
 }
 
@@ -126,28 +126,25 @@ let rutaMostrada = null;
 
 function mostrarRuta() {
     // popstate y hashchange pueden llegar juntos: no repetir el mismo cambio
-    const hash = location.hash.length > 2 ? location.hash : '#/';
-    if (hash === rutaMostrada) return;
-    rutaMostrada = hash;
+    if (location.hash === rutaMostrada) return;
 
-    const { galeria, nombre, numero } = leerRuta();
+    const { galeria, numero } = leerRuta();
+    let ruta;
 
     if (!galeria) {
-        if (nombre) history.replaceState(null, '', '#/');
-        rutaMostrada = '#/';
+        ruta = '#/';
         mostrarPrincipal();
-        return;
+    } else if (Number.isNaN(numero) || numero < 1 || numero > galeria.fotos.length) {
+        ruta = rutaGaleria(galeria);
+        mostrarGaleria(galeria);
+    } else {
+        ruta = rutaFoto(galeria, numero - 1);
+        mostrarFoto(galeria, numero - 1);
     }
 
-    if (Number.isNaN(numero)) {
-        mostrarGaleria(galeria);
-    } else if (numero >= 1 && numero <= galeria.fotos.length) {
-        mostrarFoto(galeria, numero - 1);
-    } else {
-        history.replaceState(history.state, '', rutaGaleria(galeria));
-        rutaMostrada = location.hash;
-        mostrarGaleria(galeria);
-    }
+    // Corrige en la barra de direcciones las rutas inválidas o escritas a mano
+    if (location.hash && location.hash !== ruta) history.replaceState(history.state, '', ruta);
+    rutaMostrada = location.hash;
 }
 
 // ---------- Cambio de vista ----------
@@ -182,11 +179,12 @@ function crearElementoGaleria(galeria, indice) {
 
     const portada = galeria.fotos[0];
     const img = document.createElement('img');
-    img.src = portada.mini;
-    img.alt = '';
+    // loading debe fijarse antes que src o el navegador descarga la imagen ya.
     // Las primeras portadas se ven nada más abrir la web: no retrasarlas
     img.loading = indice < 6 ? 'eager' : 'lazy';
     img.decoding = 'async';
+    img.src = portada.mini;
+    img.alt = '';
 
     const pie = document.createElement('span');
     pie.className = 'galeria-pie';
@@ -200,10 +198,9 @@ function crearElementoGaleria(galeria, indice) {
 
     enlace.append(img, pie);
     enlace.addEventListener('click', (e) => {
-        if (esClicNormal(e)) {
-            e.preventDefault();
-            navegar(rutaGaleria(galeria));
-        }
+        if (!esClicNormal(e)) return;
+        e.preventDefault();
+        if (e.detail <= 1) navegar(rutaGaleria(galeria), '#/');
     });
     return enlace;
 }
@@ -237,7 +234,10 @@ function mostrarPrincipal() {
     // Al volver, el foco regresa a la galería de la que venimos
     const tarjeta = vieneDe &&
         [...elementos.contenedorGalerias.children].find(el => el.dataset.galeria === vieneDe.nombre);
-    enfocar(tarjeta || null);
+    if (tarjeta) {
+        tarjeta.scrollIntoView({ block: 'nearest' });
+        enfocar(tarjeta);
+    }
 }
 
 // ---------- Vista de galería ----------
@@ -250,20 +250,31 @@ function crearElementoFoto(galeria, foto, indice) {
 
     const proporcion = foto.proporcion || PROPORCION_POR_DEFECTO;
     enlace.style.setProperty('--proporcion', proporcion.toFixed(4));
-    if (!foto.proporcion) enlace.classList.add('sin-dimensiones');
 
     const img = document.createElement('img');
+    img.loading = 'lazy';  // antes que src, o se descarga de inmediato
+    img.decoding = 'async';
     img.src = foto.mini;
     img.alt = `Foto ${indice + 1} de ${galeria.fotos.length}`;
-    img.loading = 'lazy';
-    img.decoding = 'async';
     enlace.append(img);
 
+    // Sin dimensiones en galleries.js (formato antiguo o sin Pillow): se toman
+    // de la miniatura cuando carga, para no recortarla
+    if (!foto.proporcion) {
+        enlace.classList.add('sin-dimensiones');
+        img.addEventListener('load', () => {
+            if (!img.naturalWidth || !img.naturalHeight) return;
+            foto.proporcion = img.naturalWidth / img.naturalHeight;
+            enlace.style.setProperty('--proporcion', foto.proporcion.toFixed(4));
+            enlace.classList.remove('sin-dimensiones');
+        }, { once: true });
+    }
+
     enlace.addEventListener('click', (e) => {
-        if (esClicNormal(e)) {
-            e.preventDefault();
-            navegar(rutaFoto(galeria, indice));
-        }
+        if (!esClicNormal(e)) return;
+        e.preventDefault();
+        // En un doble clic, el segundo no debe cerrar el visor que abrió el primero
+        if (e.detail <= 1) navegar(rutaFoto(galeria, indice), rutaGaleria(galeria));
     });
     return enlace;
 }
@@ -279,7 +290,7 @@ function renderizarFotosGaleria(galeria) {
 }
 
 function mostrarGaleria(galeria) {
-    const vieneDe = estadoActual.vista;
+    const desdeVisor = estadoActual.vista === 'foto' && estadoActual.galeria === galeria;
     const esNueva = estadoActual.galeriaRenderizada !== galeria;
 
     if (esNueva) renderizarFotosGaleria(galeria);
@@ -287,11 +298,11 @@ function mostrarGaleria(galeria) {
     document.title = `${galeria.titulo} · ${tituloSitio}`;
     cambiarVista('galeria');
 
-    if (vieneDe === 'foto' && !esNueva) {
+    if (desdeVisor) {
         // Al cerrar el visor, volvemos a la miniatura de la última foto vista
         const miniatura = elementos.contenedorFotos.children[estadoActual.fotoActual];
         if (miniatura) {
-            miniatura.scrollIntoView({ block: 'nearest' });
+            miniatura.scrollIntoView({ block: esNueva ? 'center' : 'nearest' });
             enfocar(miniatura);
         }
     } else {
@@ -303,22 +314,24 @@ function mostrarGaleria(galeria) {
 // ---------- Visor de foto completa ----------
 
 function mostrarFoto(galeria, indice) {
-    if (estadoActual.galeriaRenderizada !== galeria) renderizarFotosGaleria(galeria);
+    // La cuadrícula no se crea aquí: con un enlace directo a una foto se
+    // descargarían miniaturas que nadie ve. Se crea al cerrar el visor.
     const abriendo = estadoActual.vista !== 'foto';
     estadoActual.galeria = galeria;
     estadoActual.fotoActual = indice;
 
     const foto = galeria.fotos[indice];
     const total = galeria.fotos.length;
-    const texto = `${galeria.titulo} · ${indice + 1} / ${total}`;
+    const posicion = `${indice + 1} / ${total}`;
 
-    elementos.infoFoto.textContent = texto;
+    elementos.infoTitulo.textContent = galeria.titulo;
+    elementos.infoPosicion.textContent = posicion;
     elementos.imagenCompleta.alt = `Foto ${indice + 1} de ${total} de ${galeria.titulo}`;
     elementos.btnOriginal.href = foto.original;
     elementos.btnOriginal.hidden = foto.original === foto.src;
     elementos.btnAnterior.hidden = total < 2;
     elementos.btnSiguiente.hidden = total < 2;
-    document.title = `${texto} · ${tituloSitio}`;
+    document.title = `${galeria.titulo} · ${posicion} · ${tituloSitio}`;
 
     cargarImagen(foto);
     precargarVecinas(galeria, indice);
@@ -339,18 +352,19 @@ function cargarImagen(foto) {
     grande.decoding = 'async';
     estadoActual.cargaPendiente = grande;
 
-    const terminar = () => {
+    const terminar = (cargada) => {
         if (estadoActual.cargaPendiente !== grande) return;
         estadoActual.cargaPendiente = null;
-        img.src = foto.src;
+        // Si la versión grande falla, se queda la miniatura en vez de una imagen rota
+        if (cargada) img.src = foto.src;
         contenedor.classList.remove('cargando');
     };
-    grande.onload = terminar;
-    grande.onerror = terminar;
+    grande.onload = () => terminar(true);
+    grande.onerror = () => terminar(false);
     grande.src = foto.src;
 
     if (grande.complete && grande.naturalWidth > 0) {
-        terminar();
+        terminar(true);
     } else {
         img.src = foto.mini;
         contenedor.classList.add('cargando');
@@ -416,9 +430,25 @@ elementos.btnCerrar.addEventListener('click', cerrarVisor);
 elementos.btnAnterior.addEventListener('click', () => cambiarFoto(-1));
 elementos.btnSiguiente.addEventListener('click', () => cambiarFoto(1));
 
-// Clic en el fondo oscuro (fuera de la foto) cierra el visor
+// La foto ocupa toda la caja de la imagen (object-fit: contain), así que hay que
+// calcular si el clic cae en la foto o en las franjas vacías de alrededor
+function clicFueraDeLaFoto(e) {
+    const img = elementos.imagenCompleta;
+    if (e.target === elementos.contenedorImagen) return true;
+    if (e.target !== img || !img.naturalWidth) return false;
+    const caja = img.getBoundingClientRect();
+    const escala = Math.min(caja.width / img.naturalWidth, caja.height / img.naturalHeight);
+    const ancho = img.naturalWidth * escala;
+    const alto = img.naturalHeight * escala;
+    const x = e.clientX - caja.left - (caja.width - ancho) / 2;
+    const y = e.clientY - caja.top - (caja.height - alto) / 2;
+    return x < 0 || y < 0 || x > ancho || y > alto;
+}
+
+// Clic en el fondo oscuro (fuera de la foto) cierra el visor. Se ignora el
+// segundo clic de un doble clic para no abrir la miniatura que queda debajo.
 elementos.contenedorImagen.addEventListener('click', (e) => {
-    if (e.target === elementos.contenedorImagen) cerrarVisor();
+    if (e.detail <= 1 && clicFueraDeLaFoto(e)) cerrarVisor();
 });
 
 document.addEventListener('keydown', (e) => {
